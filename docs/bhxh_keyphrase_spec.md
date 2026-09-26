@@ -81,8 +81,9 @@ Toàn bộ luồng nằm trong `app.py` (route `/api/chat`) gọi `guard_service
 - **Bước 2 - Vector retrieval:** `gemini_service.embed_text()` (Gemini Embedding, 768 chiều) nhúng câu hỏi, gọi RPC `match_legal_documents` trên Supabase pgvector để tìm chunk gần nghĩa nhất qua cosine similarity (`match_threshold=0.3`), không yêu cầu khớp chính xác từ khóa.
 - **Bước 3 - Hybrid re-rank theo `provision_type`:** `guard_service.classify_provision_types()` đoán "dạng câu hỏi" (P1-P9). Kết quả truyền vào `search_legal_documents(query_vector, query_provision_types=...)`, cộng thêm `PROVISION_TYPE_BOOST = 0.05` (nhỏ so với thang similarity 0..1) vào điểm của chunk có `provision_type` khớp, sắp lại toàn bộ `results` theo điểm kết hợp này **trước** bước round-robin - vì round-robin chỉ lấy tối đa vài đoạn đầu mỗi văn bản nên phải ưu tiên đúng thứ tự từ trước đó.
 - **Bước 4 - Đa dạng hóa kết quả (round-robin, 2 vòng):** vòng 1 lấy xoay vòng tối đa `max_per_doc=3` đoạn/văn bản cho tới khi đủ `max_total_chunks=12` hoặc hết dữ liệu; vòng 2 (nếu vòng 1 chưa lấp đầy 12, tức số văn bản liên quan thực sự ít) bỏ giới hạn `max_per_doc`, lấy tiếp các đoạn còn lại đã ưu tiên sẵn - tránh lãng phí slot khi chỉ có ít văn bản nhưng liên quan sâu (nhiều Khoản).
-- **Bước 5 - Đối chiếu quan hệ sửa đổi (đa tầng bằng BFS):** mỗi chunk khi ingest được gắn `amendments_to` (văn bản này sửa Điều/Khoản nào của văn bản khác - AI trích trực tiếp từ câu chữ, VD "sửa đổi Điều 3... Nghị định số 68/2026/NĐ-CP"); `ingest_rag.py:backfill_amended_by()` ghi ngược quan hệ đó thành `amended_by` vào đúng chunk cũ bị sửa (PATCH 1 lần lúc ingest, không phải mỗi câu hỏi). Khi trả lời, `supabase_service._fetch_amending_chunks()` duyệt **BFS nhiều tầng** theo `amended_by`: nếu văn bản B sửa A, rồi văn bản C lại sửa B, hệ thống tự lần sang C ở tầng kế tiếp (không dừng ở 1 tầng), mỗi tầng chỉ tốn đúng 1 request HTTP (gộp bằng `or=(and(...),...)`), giới hạn an toàn `max_hops=5`/`max_total=30`.
-- **Bước 6 - Sinh câu trả lời có căn cứ:** đưa các chunk truy xuất được (kèm cảnh báo "đã bị sửa đổi bởi..." nếu có `amended_by`) vào context, LLM bắt buộc trích dẫn Điều/Khoản, không suy diễn ngoài context (nguyên tắc 2.1–2.4 trong `gemini_service.py`, hệ thống chỉ dẫn "chuyên gia tư vấn BHXH").
+- **Bước 5 - Đối chiếu quan hệ sửa đổi (đa tầng bằng BFS):** mỗi chunk khi ingest được gắn `amendments_to` (văn bản này sửa Điều/Khoản nào của văn bản khác - AI trích trực tiếp từ câu chữ, VD "sửa đổi Điều 3... Nghị định số 68/2026/NĐ-CP"); `ingest_rag.py:backfill_amended_by()` ghi ngược quan hệ đó thành `amended_by` vào đúng chunk cũ bị sửa (PATCH 1 lần lúc ingest, không phải mỗi câu hỏi). Mỗi văn bản được định danh bằng bộ ba `law_number` + `law_year` + `law_suffix` (VD `41/2024/QH15` khác `41/2024/NĐ-CP`), mọi truy vấn khớp đều lọc đủ cả ba; tham chiếu thiếu ký hiệu bị bỏ qua thay vì đoán, vì ghi nhầm quan hệ pháp lý nguy hiểm hơn thiếu quan hệ. Khi trả lời, `supabase_service._fetch_amending_chunks()` duyệt **BFS nhiều tầng** theo `amended_by`: nếu văn bản B sửa A, rồi văn bản C lại sửa B, hệ thống tự lần sang C ở tầng kế tiếp (không dừng ở 1 tầng), mỗi tầng chỉ tốn đúng 1 request HTTP (gộp bằng `or=(and(...),...)`), giới hạn an toàn `max_hops=5`/`max_total=30`.
+- **Bước 6 - Sinh câu trả lời có căn cứ:** đưa các chunk truy xuất được vào context - kèm cảnh báo "đã bị sửa đổi bởi..." nếu có `amended_by`, và thẻ `[ĐÃ HẾT HIỆU LỰC]` cùng tên văn bản thay thế nếu có `superseded_by` (văn bản bị thay thế toàn bộ, VD Luật 58/2014/QH13 bởi Luật 41/2024/QH15). LLM bắt buộc trích dẫn Điều/Khoản, không suy diễn ngoài context, không trình bày đoạn hết hiệu lực như quy định đang áp dụng (nguyên tắc 2.1–2.5 trong `gemini_service.py`, hệ thống chỉ dẫn "chuyên gia tư vấn BHXH").
+- **Bước 7 - Xem nội dung nguồn tham chiếu:** khi người dùng bấm vào một nguồn, `/api/document` tách nhãn (VD "Luật ... 41/2024/QH15 (Điều 3)") thành `law_name`/Điều/Khoản rồi khớp **chính xác** theo metadata, không dùng `ilike` trên tiêu đề (vì "Điều 3" sẽ khớp nhầm "Điều 34").
 
 ### 6. Schema metadata mỗi chunk (triển khai trong `ingest_rag.py`)
 
@@ -93,12 +94,19 @@ Toàn bộ luồng nằm trong `app.py` (route `/api/chat`) gọi `guard_service
   "law_name": "Nghị định số 68/2026/NĐ-CP",
   "law_number": "68",
   "law_year": 2026,
+  "law_suffix": "NĐ-CP",
   "article": "3",
   "section": "1",
   "amendments_to": [],
+  "supersedes": [],
   "amended_by": [
-    {"law_number": "141", "law_year": 2026, "article": "1", "section": "1"}
-  ]
+    {"law_number": "141", "law_year": 2026, "law_suffix": "NĐ-CP", "article": "1", "section": "1"}
+  ],
+  "superseded_by": null
 }
 ```
-`law_number`/`law_year` được tách bằng regex từ `law_name` đã làm sạch (không nhờ AI đoán số, tránh ảo giác), dùng để so khớp chính xác (`=`) thay vì "ilike" chuỗi con. `amendments_to` được AI điền trực tiếp lúc bóc tách văn bản MỚI (biết ngay nó đang sửa gì, nhờ đọc đúng câu chữ trong văn bản). `amended_by` luôn khởi tạo rỗng lúc ingest và chỉ được `backfill_amended_by()` ghi ngược vào văn bản cũ sau đó.
+`law_number`/`law_year`/`law_suffix` (phần đuôi số hiệu như `QH15`, `NĐ-CP`, `TT-BTC`) được tách bằng regex từ `law_name` đã làm sạch (không nhờ AI đoán số, tránh ảo giác), dùng để so khớp chính xác (`=`) thay vì "ilike" chuỗi con; bộ ba này mới định danh duy nhất một văn bản, vì số hiệu + năm có thể trùng giữa các loại văn bản. `amendments_to` được AI điền trực tiếp lúc bóc tách văn bản MỚI (biết ngay nó đang sửa gì, nhờ đọc đúng câu chữ trong văn bản). `amended_by` luôn khởi tạo rỗng lúc ingest và chỉ được `backfill_amended_by()` ghi ngược vào văn bản cũ sau đó.
+
+`supersedes` (AI điền khi chunk - thường là điều khoản thi hành - nêu một văn bản khác hết hiệu lực/bị thay thế **toàn bộ**, khác với `amendments_to` là sửa một Điều/Khoản cụ thể) được `_apply_supersedes_backfill()` ghi ngược thành `superseded_by` (= `law_name` của văn bản thay thế, chỉ dùng để hiển thị cảnh báo, không dùng để so khớp) vào mọi chunk của văn bản cũ.
+
+Nếu ingest sai thứ tự (văn bản mới trước văn bản cũ) thì lúc đó văn bản cũ chưa có trong DB nên không ghi được `amended_by`/`superseded_by`; chạy `python ingest_rag.py --fix-amended-by` để quét lại toàn bộ DB và bù (chỉ gọi Supabase, không tốn lượt AI).

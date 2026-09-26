@@ -8,7 +8,8 @@
 - 📚 **Tra cứu Luật Bảo hiểm xã hội Chính xác:** Tích hợp RAG với cơ sở dữ liệu pháp luật được trích xuất từ **Luật Bảo hiểm xã hội số 41/2024/QH15** cùng các nghị định hướng dẫn liên quan (157, 158, 159, 176, 274/2025/NĐ-CP).
 - 🧠 **Tầng định tuyến bằng từ khóa (GuardService):** `GuardService.needs_rag()` chỉ kích hoạt RAG khi câu hỏi khớp ít nhất 1 từ khóa cốt lõi (core keyword) đặc thù của miền BHXH — tránh gọi Gemini Embedding/Supabase cho các câu hỏi rõ ràng ngoài phạm vi.
 - 🎯 **Hybrid re-rank theo dạng quy định:** Câu hỏi được phân loại theo 9 "dạng quy định" (P1–P9: định nghĩa, điều kiện hưởng, mức hưởng, thủ tục...) để ưu tiên đúng loại đoạn luật phù hợp, kết hợp với độ tương đồng vector thay vì chỉ dựa thuần similarity.
-- 🔗 **Đối chiếu quan hệ sửa đổi văn bản (BFS đa tầng):** Khi ingest, hệ thống tự nhận diện văn bản nào sửa đổi Điều/Khoản nào của văn bản khác; lúc trả lời, `_fetch_amending_chunks()` duyệt theo tầng (Breadth-First Search) để tìm đúng phiên bản mới nhất, kể cả khi bị sửa đổi nhiều lớp.
+- 🔗 **Đối chiếu quan hệ sửa đổi văn bản (BFS đa tầng):** Khi ingest, hệ thống tự nhận diện văn bản nào sửa đổi Điều/Khoản nào của văn bản khác (mỗi văn bản được định danh bằng bộ ba số hiệu + năm + ký hiệu, VD `41/2024/QH15` khác `41/2024/NĐ-CP`); lúc trả lời, `_fetch_amending_chunks()` duyệt theo tầng (Breadth-First Search) để tìm đúng phiên bản mới nhất, kể cả khi bị sửa đổi nhiều lớp.
+- ⛔ **Cảnh báo văn bản hết hiệu lực:** Khi một luật mới thay thế toàn bộ luật cũ (VD Luật BHXH 41/2024/QH15 thay thế 58/2014/QH13), AI tự nhận diện từ điều khoản thi hành và các đoạn của luật cũ được gắn cảnh báo "ĐÃ HẾT HIỆU LỰC" trong ngữ cảnh, để câu trả lời không áp dụng nhầm quy định cũ.
 - 🛡️ **Bảo mật & Kiểm soát Đa lớp (GuardService):** Tự động phát hiện và chặn các cuộc tấn công Prompt Injection, Jailbreak, lọc các câu hỏi không liên quan và kiểm tra chống rò rỉ dữ liệu hệ thống.
 - 🔒 **Mã hóa Dữ liệu Nhạy cảm:** Tất cả tệp tin tài liệu/sổ BHXH/tờ khai do người dùng tải lên được mã hóa đối xứng bằng Fernet (AES-128) trước khi lưu đĩa, bảo mật theo không gian lưu trữ riêng (namespace) cho từng người dùng.
 - 🖼️ **Xử lý Đa phương thức (Multimodal):** Hỗ trợ phân tích nội dung từ hình ảnh, tài liệu PDF và tệp văn bản đính kèm qua mô hình Gemini.
@@ -96,7 +97,12 @@ python ingest_rag.py --file ../documents/41_2024_QH15.txt
 # Hoặc trực tiếp từ URL văn bản luật (không cần lưu file cục bộ)
 python ingest_rag.py --url https://...
 ```
-Script tự bóc tách theo cấu trúc Điều/Khoản, gắn `provision_type` (P1–P9) và nhận diện quan hệ sửa đổi (`amendments_to`/`amended_by`) giữa các văn bản, rồi nhúng vector và lưu vào bảng `legal_documents` trên Supabase.
+Script tự bóc tách theo cấu trúc Điều/Khoản, gắn `provision_type` (P1–P9) và nhận diện quan hệ sửa đổi (`amendments_to`/`amended_by`) cùng quan hệ thay thế toàn văn (`supersedes`/`superseded_by`) giữa các văn bản, rồi nhúng vector và lưu vào bảng `legal_documents` trên Supabase.
+
+> ⚠️ **Thứ tự nạp:** quan hệ `amended_by`/`superseded_by` được ghi ngược vào văn bản cũ ngay lúc nạp văn bản mới, nên nên nạp văn bản **cũ trước, mới sau**. Nếu lỡ nạp sai thứ tự, chạy lệnh dưới đây (hoặc chọn mục 4 trong menu tương tác) để quét lại toàn bộ DB và bù quan hệ còn thiếu, không cần nạp lại và không tốn thêm lượt gọi AI:
+> ```bash
+> python ingest_rag.py --fix-amended-by
+> ```
 
 ### 4. Triển khai Frontend (Next.js)
 ```bash
