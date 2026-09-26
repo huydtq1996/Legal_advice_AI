@@ -324,82 +324,34 @@ def get_document():
     if not supabase_service.url or not supabase_service.key:
          return jsonify({"error": "Supabase not configured"}), 500
          
-    # Parse title "Nghị định số: 141/2026/NĐ-CP (Điều 4, Khoản 1)" -> law_name
+    # Nhãn nguồn có dạng "Nghị định số: 141/2026/NĐ-CP (Điều 4, Khoản 1)" (xem
+    # search_legal_documents) -> tách law_name/Điều/Khoản rồi khớp CHÍNH XÁC theo metadata.
+    # Không dùng ilike trên title: "Điều 3" sẽ khớp nhầm "Điều 34", "Điều 30"...
     import re
     match = re.match(r'^(.*?)(?:\s*\((.*?)\))?$', title)
-    law_name = title
-    db_title = title
-    if match:
-        law_name = match.group(1).strip()
-        details = match.group(2)
-        if details:
-            # Chuyển "Điều 10, Khoản 1" thành "Điều 10 - Khoản 1"
-            details_str = details.replace(', ', ' - ')
-            db_title = f"{law_name} - {details_str}"
-            
+    law_name = match.group(1).strip() if match else title
+    details = (match.group(2) or '') if match else ''
+    article_m = re.search(r'Điều\s+([^,\s]+)', details)
+    section_m = re.search(r'Khoản\s+([^,\s]+)', details)
+
     headers = {"apikey": supabase_service.key, "Authorization": f"Bearer {supabase_service.key}"}
-    
+
     try:
-        # Cách 1: Thử tìm chính xác bằng cột title (cấu trúc gốc trong DB)
-        params_exact = {
-            "select": "content,metadata,title",
-            "title": f"ilike.*{db_title}*",
-            "limit": 1
-        }
-        resp_exact = requests.get(f"{supabase_service.url}/rest/v1/legal_documents", headers=headers, params=params_exact, timeout=5)
-        if resp_exact.status_code == 200:
-            results_exact = resp_exact.json()
-            if results_exact and len(results_exact) > 0:
-                return jsonify({"title": title, "content": results_exact[0].get('content', '')})
-        
-        # Cách 2: Tìm kiếm tương đối (Fallback)
-        doc_info = supabase_service._parse_doc_id(law_name)
-        search_term = doc_info['full'] if doc_info else law_name
-        
         params = {
-            "select": "content,metadata,title",
-            "content": f"ilike.*{search_term}*",
-            "limit": 50
+            "select": "content,title",
+            "metadata->>law_name": f"eq.{law_name}",
+            "metadata->>article": f"eq.{article_m.group(1)}" if article_m else "is.null",
+            "metadata->>section": f"eq.{section_m.group(1)}" if section_m else "is.null",
+            "order": "title.asc",
         }
-        
         resp = requests.get(f"{supabase_service.url}/rest/v1/legal_documents", headers=headers, params=params, timeout=5)
-        
         if resp.status_code == 200:
-            results = resp.json()
-            # Filter results to exactly match the title if possible
-            best_match = None
-            for row in results:
-                meta = row.get('metadata', {})
-                # Try exact db_title match on row's title first
-                if row.get('title') == db_title:
-                    best_match = row
-                    break
-                    
-                row_law_name = meta.get('law_name', row.get('title', ''))
-                article = meta.get('article', 'N/A')
-                section = meta.get('section', 'N/A')
-                
-                source_parts = []
-                if article and article != 'N/A':
-                    source_parts.append(f"Điều {article}")
-                if section and section != 'N/A':
-                    source_parts.append(f"Khoản {section}")
-                
-                source_label = row_law_name
-                if source_parts:
-                    source_label += f" ({', '.join(source_parts)})"
-                    
-                if source_label == title:
-                    best_match = row
-                    break
-                    
-            if not best_match and len(results) > 0:
-                best_match = results[0] # Fallback to first matching doc
-                
-            if best_match:
-                content = best_match.get('content', '')
+            rows = resp.json()
+            if rows:
+                # Nhiều chunk cùng Điều/Khoản (VD tách theo Điểm a, b...) -> gộp lại theo thứ tự
+                content = "\n\n".join(r.get('content', '') for r in rows)
                 return jsonify({"title": title, "content": content})
-                
+
     except Exception as e:
         logger.error(f"Error fetching document: {e}")
         
